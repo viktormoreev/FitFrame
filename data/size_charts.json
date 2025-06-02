@@ -1,0 +1,56 @@
+{
+  "jeans": {
+    "waist_hip_ratio": {
+      "US_00": {"waist_min": 22, "waist_max": 23, "hip_min": 31, "hip_max": 32},
+      "US_0": {"waist_min": 24, "waist_max": 25, "hip_min": 33, "hip_max": 34},
+      "US_2": {"waist_min": 26, "waist_max": 27, "hip_min": 35, "hip_max": 36},
+      "US_4": {"waist_min": 28, "waist_max": 29, "hip_min": 37, "hip_max": 38},
+      "US_6": {"waist_min": 30, "waist_max": 31, "hip_min": 39, "hip_max": 40},
+      "US_8": {"waist_min": 32, "waist_max": 33, "hip_min": 41, "hip_max": 42},
+      "US_10": {"waist_min": 34, "waist_max": 35, "hip_min": 43, "hip_max": 44},
+      "US_12": {"waist_min": 36, "waist_max": 37.5, "hip_min": 45, "hip_max": 46.5},
+      "US_14": {"waist_min": 38, "waist_max": 40, "hip_min": 47, "hip_max": 48.5},
+      "US_16": {"waist_min": 40.5, "waist_max": 43, "hip_min": 49, "hip_max": 51}
+    },
+    "size_mapping": {
+      "US_00": {"waist": 23, "hip": 32, "inseam": 30, "eu_size": "32", "uk_size": "2"},
+      "US_0": {"waist": 25, "hip": 34, "inseam": 30, "eu_size": "34", "uk_size": "4"},
+      "US_2": {"waist": 27, "hip": 36, "inseam": 30, "eu_size": "36", "uk_size": "6"},
+      "US_4": {"waist": 29, "hip": 38, "inseam": 30, "eu_size": "38", "uk_size": "8"},
+      "US_6": {"waist": 31, "hip": 40, "inseam": 30, "eu_size": "40", "uk_size": "10"},
+      "US_8": {"waist": 33, "hip": 42, "inseam": 30, "eu_size": "42", "uk_size": "12"},
+      "US_10": {"waist": 35, "hip": 44, "inseam": 30, "eu_size": "44", "uk_size": "14"},
+      "US_12": {"waist": 37, "hip": 46, "inseam": 30, "eu_size": "46", "uk_size": "16"},
+      "US_14": {"waist": 39, "hip": 48, "inseam": 30, "eu_size": "48", "uk_size": "18"},
+      "US_16": {"waist": 41, "hip": 50, "inseam": 30, "eu_size": "50", "uk_size": "20"}
+    }
+  },
+  "dresses": {
+    "size_mapping": {
+      "US_00/XS": {"bust": 31, "waist": 23, "hip": 33, "eu_size": "32", "uk_size": "2"},
+      "US_0/XS": {"bust": 33, "waist": 25, "hip": 35, "eu_size": "34", "uk_size": "4"},
+      "US_2/XS": {"bust": 34, "waist": 26, "hip": 36, "eu_size": "36", "uk_size": "6"},
+      "US_4/S": {"bust": 36, "waist": 28, "hip": 38, "eu_size": "38", "uk_size": "8"},
+      "US_6/S": {"bust": 37, "waist": 30, "hip": 39, "eu_size": "40", "uk_size": "10"},
+      "US_8/M": {"bust": 38, "waist": 32, "hip": 40, "eu_size": "42", "uk_size": "12"},
+      "US_10/M": {"bust": 39, "waist": 34, "hip": 41, "eu_size": "44", "uk_size": "14"},
+      "US_12/L": {"bust": 41, "waist": 36, "hip": 43, "eu_size": "46", "uk_size": "16"},
+      "US_14/L": {"bust": 43, "waist": 38, "hip": 45, "eu_size": "48", "uk_size": "18"},
+      "US_16/XL": {"bust": 45, "waist": 40, "hip": 47, "eu_size": "50", "uk_size": "20"}
+    }
+  },
+  "skirts": {
+    "size_mapping": {
+      "US_00/XS": {"waist": 23, "hip": 33, "eu_size": "32", "uk_size": "2"},
+      "US_0/XS": {"waist": 25, "hip": 35, "eu_size": "34", "uk_size": "4"},
+      "US_2/XS": {"waist": 26, "hip": 36, "eu_size": "36", "uk_size": "6"},
+      "US_4/S": {"waist": 28, "hip": 38, "eu_size": "38", "uk_size": "8"},
+      "US_6/S": {"waist": 30, "hip": 39, "eu_size": "40", "uk_size": "10"},
+      "US_8/M": {"waist": 32, "hip": 40, "eu_size": "42", "uk_size": "12"},
+      "US_10/M": {"waist": 34, "hip": 41, "eu_size": "44", "uk_size": "14"},
+      "US_12/L": {"waist": 36, "hip": 43, "eu_size": "46", "uk_size": "16"},
+      "US_14/L": {"waist": 38, "hip": 45, "eu_size": "48", "uk_size": "18"},
+      "US_16/XL": {"waist": 40, "hip": 47, "eu_size": "50", "uk_size": "20"}
+    }
+  }
+}
