@@ -196,3 +196,31 @@
   background-color: #6c757d;
   border-color: #6c757d;
 }
+
+/* Debug Images Section Styles */
+.debug-images {
+  margin-top: 2rem;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  padding: 1.5rem;
+  background-color: white;
+}
+
+.debug-images h3 {
+  font-size: 1.25rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #e9ecef;
+}
+
+.marked-image-container {
+  text-align: center;
+  margin: 1rem 0;
+}
+
+.marked-image-container img {
+  max-width: 100%;
+  max-height: 500px;
+  border-radius: 5px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}

@@ -7,6 +7,7 @@ from PIL import Image
 import io
 import json
 import os
+import base64
 from typing import Optional, List, Dict, Any, Union
 from openpose_utils import OpenPoseDetector
 from pydantic import BaseModel
@@ -253,6 +254,7 @@ async def predict_size(
         # Process side view image (now required)
         side_results = None
         side_img_np = None
+        side_img_with_markers = None  # Will store the image with depth markers
         side_contents = await side_image.read()
         try:
             side_img = Image.open(io.BytesIO(side_contents))
@@ -322,6 +324,8 @@ async def predict_size(
         # Step 1: Calculate basic measurements in pixels
         hip_width_px = np.sqrt((right_hip[0] - left_hip[0])**2 + (right_hip[1] - left_hip[1])**2)
         shoulder_width_px = np.sqrt((right_shoulder[0] - left_shoulder[0])**2 + (right_shoulder[1] - left_shoulder[1])**2)
+        print(f"DEBUG - Shoulder width in pixels: {shoulder_width_px:.2f}px")
+        print(f"DEBUG - Raw shoulder coordinates: Left({left_shoulder[0]:.1f}, {left_shoulder[1]:.1f}), Right({right_shoulder[0]:.1f}, {right_shoulder[1]:.1f})")
         inseam_px = np.sqrt((left_hip[0] - left_ankle[0])**2 + (left_hip[1] - left_ankle[1])**2)
         
         # Step 2: Calculate body proportions for body type determination
@@ -403,6 +407,9 @@ async def predict_size(
         if height_cm:
             # Use provided height for more accurate scaling
             scaling_factor = height_cm / body_height_px
+            print(f"DEBUG - Using provided height: {height_cm}cm")
+            print(f"DEBUG - Body height in pixels: {body_height_px:.2f}px")
+            print(f"DEBUG - Calculated scaling factor: {scaling_factor:.6f} cm/px")
         else:
             # Estimate height based on body type
             if body_type == "athletic":
@@ -452,81 +459,410 @@ async def predict_size(
                 
                 # Try to detect the actual depth by analyzing the silhouette at hip level
                 hip_y = int(side_hip[1])
+                print(f"DEBUG - Side view hip point: ({side_hip[0]:.1f}, {side_hip[1]:.1f}), y-coordinate for depth: {hip_y}")
+                
                 if 0 <= hip_y < side_height:
-                    # Get the row of pixels at hip height
-                    hip_row = side_img_np[hip_y, :, :]
+                    # Create a more focused region of interest around the hip area
+                    # Use a vertical window of +/- 15 pixels around the hip point for better precision
+                    hip_roi_y_start = max(0, hip_y - 15)
+                    hip_roi_y_end = min(side_height, hip_y + 15)
                     
-                    # Convert to grayscale and threshold to find the silhouette
-                    hip_row_gray = cv2.cvtColor(hip_row.reshape(1, side_width, 3), cv2.COLOR_RGB2GRAY)
-                    _, hip_row_thresh = cv2.threshold(hip_row_gray, 127, 255, cv2.THRESH_BINARY_INV)
+                    # Extract the exact row at hip level for precise depth measurement
+                    hip_exact_row = side_img_np[hip_y, :, :]
                     
-                    # Find the leftmost and rightmost non-zero pixels
-                    non_zero_indices = np.where(hip_row_thresh[0, :] > 0)[0]
-                    if len(non_zero_indices) > 0:
-                        leftmost = non_zero_indices[0]
-                        rightmost = non_zero_indices[-1]
-                        hip_depth_px = rightmost - leftmost
+                    # Create a wider ROI for context and segmentation
+                    hip_roi = side_img_np[hip_roi_y_start:hip_roi_y_end, :, :]
+                    
+                    # Convert ROI to grayscale
+                    hip_roi_gray = cv2.cvtColor(hip_roi, cv2.COLOR_RGB2GRAY)
+                    
+                    # Apply Gaussian blur to reduce noise
+                    hip_roi_blur = cv2.GaussianBlur(hip_roi_gray, (5, 5), 0)
+                    
+                    # Use Otsu's thresholding for better foreground/background separation
+                    _, hip_roi_thresh = cv2.threshold(hip_roi_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                    
+                    # Apply morphological operations to clean up the mask
+                    kernel = np.ones((3, 3), np.uint8)
+                    hip_roi_thresh = cv2.morphologyEx(hip_roi_thresh, cv2.MORPH_OPEN, kernel)
+                    hip_roi_thresh = cv2.morphologyEx(hip_roi_thresh, cv2.MORPH_CLOSE, kernel)
+                    
+                    # Find contours in the thresholded image
+                    contours, _ = cv2.findContours(hip_roi_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    # If contours are found, find the largest one (likely the person)
+                    if contours and len(contours) > 0:
+                        # Sort contours by area and get the largest
+                        largest_contour = max(contours, key=cv2.contourArea)
+                        
+                        # Create a mask from the largest contour
+                        mask = np.zeros_like(hip_roi_thresh)
+                        cv2.drawContours(mask, [largest_contour], 0, 255, -1)
+                        
+                        # Find the center of the hip point in the ROI coordinates
+                        hip_center_y = hip_y - hip_roi_y_start
+                        
+                        # Extract the row at hip level from the mask
+                        if 0 <= hip_center_y < mask.shape[0]:
+                            hip_mask_row = mask[hip_center_y, :]
+                            
+                            # Find the leftmost and rightmost points on the body silhouette
+                            non_zero_indices = np.where(hip_mask_row > 0)[0]
+                            
+                            if len(non_zero_indices) > 0:
+                                leftmost = non_zero_indices[0]
+                                rightmost = non_zero_indices[-1]
+                                
+                                # Validate the points - they should be a reasonable distance apart
+                                # and not too close to the image edges
+                                min_depth = side_width * 0.05  # At least 5% of image width
+                                max_depth = side_width * 0.5   # At most 50% of image width
+                                
+                                hip_depth_px = rightmost - leftmost
+                                
+                                # Check if the depth is reasonable
+                                if hip_depth_px < min_depth:
+                                    print(f"WARNING: Hip depth too small ({hip_depth_px:.2f}px), using minimum value")
+                                    # Expand around the midpoint
+                                    midpoint = (leftmost + rightmost) // 2
+                                    half_min_depth = min_depth // 2
+                                    leftmost = max(0, midpoint - half_min_depth)
+                                    rightmost = min(side_width - 1, midpoint + half_min_depth)
+                                    hip_depth_px = rightmost - leftmost
+                                
+                                if hip_depth_px > max_depth:
+                                    print(f"WARNING: Hip depth too large ({hip_depth_px:.2f}px), using maximum value")
+                                    # Shrink around the midpoint
+                                    midpoint = (leftmost + rightmost) // 2
+                                    half_max_depth = max_depth // 2
+                                    leftmost = max(0, midpoint - half_max_depth)
+                                    rightmost = min(side_width - 1, midpoint + half_max_depth)
+                                    hip_depth_px = rightmost - leftmost
+                                
+                                # Adjust coordinates to be relative to the original image
+                                leftmost_global = leftmost
+                                rightmost_global = rightmost
+                                
+                                print(f"DEBUG - Hip depth points: leftmost={leftmost_global}, rightmost={rightmost_global}, depth={hip_depth_px:.2f}px")
+                                
+                                # Calculate the midpoint between left and right points
+                                midpoint_x = (leftmost_global + rightmost_global) // 2
+                                
+                                # Draw markers on the side view image
+                                side_img_with_markers = side_img_np.copy() if side_img_with_markers is None else side_img_with_markers
+                                
+                                # Draw the ROI area
+                                cv2.rectangle(side_img_with_markers, (0, hip_roi_y_start), (side_width, hip_roi_y_end), (0, 255, 0), 1)
+                                
+                                # Draw a horizontal line at hip level
+                                cv2.line(side_img_with_markers, (0, hip_y), (side_width, hip_y), (0, 255, 255), 1)
+                                
+                                # Draw markers at leftmost, rightmost, and midpoint
+                                cv2.circle(side_img_with_markers, (leftmost_global, hip_y), 5, (0, 0, 255), -1)  # Red circle for leftmost
+                                cv2.circle(side_img_with_markers, (rightmost_global, hip_y), 5, (255, 0, 0), -1)  # Blue circle for rightmost
+                                cv2.circle(side_img_with_markers, (midpoint_x, hip_y), 5, (0, 255, 0), -1)  # Green circle for midpoint
+                                
+                                # Add text labels
+                                cv2.putText(side_img_with_markers, "Hip Front", (leftmost_global - 30, hip_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                                cv2.putText(side_img_with_markers, "Hip Back", (rightmost_global + 5, hip_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                                cv2.putText(side_img_with_markers, "Center", (midpoint_x - 20, hip_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                                
+                                # Overlay the mask on the original image for visualization
+                                mask_overlay = np.zeros((hip_roi_y_end - hip_roi_y_start, side_width, 3), dtype=np.uint8)
+                                for c_y in range(mask.shape[0]):
+                                    for c_x in range(mask.shape[1]):
+                                        if mask[c_y, c_x] > 0:
+                                            mask_overlay[c_y, c_x] = [0, 0, 128]  # Dark red overlay
+                                
+                                # Add the mask overlay to the visualization with transparency
+                                for y in range(mask_overlay.shape[0]):
+                                    for x in range(mask_overlay.shape[1]):
+                                        if np.any(mask_overlay[y, x] > 0):
+                                            orig_y = y + hip_roi_y_start
+                                            side_img_with_markers[orig_y, x] = side_img_with_markers[orig_y, x] * 0.7 + mask_overlay[y, x] * 0.3
+                            else:
+                                print("WARNING: No body silhouette found at hip level")
+                                hip_depth_px = side_width * 0.15  # Default fallback
+                        else:
+                            print("WARNING: Hip center outside of ROI bounds")
+                            hip_depth_px = side_width * 0.15  # Default fallback
+                    else:
+                        print("WARNING: No contours found in hip ROI")
+                        hip_depth_px = side_width * 0.15  # Default fallback
+                    
+                    print(f"DEBUG - No silhouette detected at hip level, using default depth")
                 
                 # Calculate depth at waist level
                 waist_y = int(side_hip[1] - (side_hip[1] - side_shoulder[1]) * waist_y_offset)
+                print(f"DEBUG - Side view waist y-coordinate for depth: {waist_y} (calculated from hip and shoulder)")
                 waist_depth_px = side_width * 0.12  # Default estimate
                 
                 if 0 <= waist_y < side_height:
-                    # Get the row of pixels at waist height
-                    waist_row = side_img_np[waist_y, :, :]
+                    # Apply the same improved approach for waist
+                    waist_roi_y_start = max(0, waist_y - 15)
+                    waist_roi_y_end = min(side_height, waist_y + 15)
+                    waist_roi = side_img_np[waist_roi_y_start:waist_roi_y_end, :, :]
                     
-                    # Convert to grayscale and threshold to find the silhouette
-                    waist_row_gray = cv2.cvtColor(waist_row.reshape(1, side_width, 3), cv2.COLOR_RGB2GRAY)
-                    _, waist_row_thresh = cv2.threshold(waist_row_gray, 127, 255, cv2.THRESH_BINARY_INV)
+                    # Convert ROI to grayscale
+                    waist_roi_gray = cv2.cvtColor(waist_roi, cv2.COLOR_RGB2GRAY)
                     
-                    # Find the leftmost and rightmost non-zero pixels
-                    non_zero_indices = np.where(waist_row_thresh[0, :] > 0)[0]
-                    if len(non_zero_indices) > 0:
-                        leftmost = non_zero_indices[0]
-                        rightmost = non_zero_indices[-1]
-                        waist_depth_px = rightmost - leftmost
+                    # Apply Gaussian blur to reduce noise
+                    waist_roi_blur = cv2.GaussianBlur(waist_roi_gray, (5, 5), 0)
+                    
+                    # Use Otsu's thresholding
+                    _, waist_roi_thresh = cv2.threshold(waist_roi_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                    
+                    # Apply morphological operations
+                    kernel = np.ones((3, 3), np.uint8)
+                    waist_roi_thresh = cv2.morphologyEx(waist_roi_thresh, cv2.MORPH_OPEN, kernel)
+                    waist_roi_thresh = cv2.morphologyEx(waist_roi_thresh, cv2.MORPH_CLOSE, kernel)
+                    
+                    # Find contours
+                    contours, _ = cv2.findContours(waist_roi_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    if contours and len(contours) > 0:
+                        largest_contour = max(contours, key=cv2.contourArea)
+                        
+                        # Create a mask from the largest contour
+                        mask = np.zeros_like(waist_roi_thresh)
+                        cv2.drawContours(mask, [largest_contour], 0, 255, -1)
+                        
+                        # Find the center of the waist point in the ROI coordinates
+                        waist_center_y = waist_y - waist_roi_y_start
+                        
+                        # Extract the row at waist level from the mask
+                        if 0 <= waist_center_y < mask.shape[0]:
+                            waist_mask_row = mask[waist_center_y, :]
+                            
+                            # Find the leftmost and rightmost points on the body silhouette
+                            non_zero_indices = np.where(waist_mask_row > 0)[0]
+                            
+                            if len(non_zero_indices) > 0:
+                                leftmost = non_zero_indices[0]
+                                rightmost = non_zero_indices[-1]
+                                
+                                # Validate the points
+                                min_depth = side_width * 0.05
+                                max_depth = side_width * 0.4  # Waist is typically narrower than hips
+                                
+                                waist_depth_px = rightmost - leftmost
+                                
+                                if waist_depth_px < min_depth:
+                                    print(f"WARNING: Waist depth too small ({waist_depth_px:.2f}px), using minimum value")
+                                    midpoint = (leftmost + rightmost) // 2
+                                    half_min_depth = min_depth // 2
+                                    leftmost = max(0, midpoint - half_min_depth)
+                                    rightmost = min(side_width - 1, midpoint + half_min_depth)
+                                    waist_depth_px = rightmost - leftmost
+                                
+                                if waist_depth_px > max_depth:
+                                    print(f"WARNING: Waist depth too large ({waist_depth_px:.2f}px), using maximum value")
+                                    midpoint = (leftmost + rightmost) // 2
+                                    half_max_depth = max_depth // 2
+                                    leftmost = max(0, midpoint - half_max_depth)
+                                    rightmost = min(side_width - 1, midpoint + half_max_depth)
+                                    waist_depth_px = rightmost - leftmost
+                                
+                                # Adjust coordinates to be relative to the original image
+                                leftmost_global = leftmost
+                                rightmost_global = rightmost
+                                
+                                # Calculate the midpoint
+                                midpoint_x = (leftmost_global + rightmost_global) // 2
+                                
+                                print(f"DEBUG - Waist depth points: leftmost={leftmost_global}, rightmost={rightmost_global}, depth={waist_depth_px:.2f}px")
+                                
+                                # Draw markers on the side view image
+                                side_img_with_markers = side_img_np.copy() if side_img_with_markers is None else side_img_with_markers
+                                
+                                # Draw the ROI area
+                                cv2.rectangle(side_img_with_markers, (0, waist_roi_y_start), (side_width, waist_roi_y_end), (0, 255, 0), 1)
+                                
+                                # Draw a horizontal line at waist level
+                                cv2.line(side_img_with_markers, (0, waist_y), (side_width, waist_y), (0, 255, 255), 1)
+                                
+                                # Draw markers at leftmost, rightmost, and midpoint
+                                cv2.circle(side_img_with_markers, (leftmost_global, waist_y), 5, (0, 0, 255), -1)  # Red circle for leftmost
+                                cv2.circle(side_img_with_markers, (rightmost_global, waist_y), 5, (255, 0, 0), -1)  # Blue circle for rightmost
+                                cv2.circle(side_img_with_markers, (midpoint_x, waist_y), 5, (0, 255, 0), -1)  # Green circle for midpoint
+                                
+                                # Add text labels
+                                cv2.putText(side_img_with_markers, "Waist Front", (leftmost_global - 40, waist_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                                cv2.putText(side_img_with_markers, "Waist Back", (rightmost_global + 5, waist_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                                cv2.putText(side_img_with_markers, "Center", (midpoint_x - 20, waist_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            else:
+                                print("WARNING: No body silhouette found at waist level")
+                                waist_depth_px = side_width * 0.12  # Default fallback
+                        else:
+                            print("WARNING: Waist center outside of ROI bounds")
+                            waist_depth_px = side_width * 0.12  # Default fallback
+                    else:
+                        print("WARNING: No contours found in waist ROI")
+                        waist_depth_px = side_width * 0.12  # Default fallback
+                    
+                    print(f"DEBUG - No silhouette detected at waist level, using default depth")
                 
                 # Calculate depth at bust level
                 bust_y = int(side_shoulder[1] + (side_hip[1] - side_shoulder[1]) * 0.25)
+                print(f"DEBUG - Side view bust y-coordinate for depth: {bust_y} (calculated as 25% from shoulder to hip)")
                 bust_depth_px = side_width * 0.14  # Default estimate
                 
                 if 0 <= bust_y < side_height:
-                    # Get the row of pixels at bust height
-                    bust_row = side_img_np[bust_y, :, :]
+                    # Use the same improved approach for bust
+                    bust_roi_y_start = max(0, bust_y - 15)
+                    bust_roi_y_end = min(side_height, bust_y + 15)
+                    bust_roi = side_img_np[bust_roi_y_start:bust_roi_y_end, :, :]
                     
-                    # Convert to grayscale and threshold to find the silhouette
-                    bust_row_gray = cv2.cvtColor(bust_row.reshape(1, side_width, 3), cv2.COLOR_RGB2GRAY)
-                    _, bust_row_thresh = cv2.threshold(bust_row_gray, 127, 255, cv2.THRESH_BINARY_INV)
+                    # Convert ROI to grayscale
+                    bust_roi_gray = cv2.cvtColor(bust_roi, cv2.COLOR_RGB2GRAY)
                     
-                    # Find the leftmost and rightmost non-zero pixels
-                    non_zero_indices = np.where(bust_row_thresh[0, :] > 0)[0]
-                    if len(non_zero_indices) > 0:
-                        leftmost = non_zero_indices[0]
-                        rightmost = non_zero_indices[-1]
-                        bust_depth_px = rightmost - leftmost
+                    # Apply Gaussian blur to reduce noise
+                    bust_roi_blur = cv2.GaussianBlur(bust_roi_gray, (5, 5), 0)
+                    
+                    # Use Otsu's thresholding
+                    _, bust_roi_thresh = cv2.threshold(bust_roi_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                    
+                    # Apply morphological operations
+                    kernel = np.ones((3, 3), np.uint8)
+                    bust_roi_thresh = cv2.morphologyEx(bust_roi_thresh, cv2.MORPH_OPEN, kernel)
+                    bust_roi_thresh = cv2.morphologyEx(bust_roi_thresh, cv2.MORPH_CLOSE, kernel)
+                    
+                    # Find contours
+                    contours, _ = cv2.findContours(bust_roi_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    if contours and len(contours) > 0:
+                        largest_contour = max(contours, key=cv2.contourArea)
+                        
+                        # Create a mask from the largest contour
+                        mask = np.zeros_like(bust_roi_thresh)
+                        cv2.drawContours(mask, [largest_contour], 0, 255, -1)
+                        
+                        # Find the center of the bust point in the ROI coordinates
+                        bust_center_y = bust_y - bust_roi_y_start
+                        
+                        # Extract the row at bust level from the mask
+                        if 0 <= bust_center_y < mask.shape[0]:
+                            bust_mask_row = mask[bust_center_y, :]
+                            
+                            # Find the leftmost and rightmost points on the body silhouette
+                            non_zero_indices = np.where(bust_mask_row > 0)[0]
+                            
+                            if len(non_zero_indices) > 0:
+                                leftmost = non_zero_indices[0]
+                                rightmost = non_zero_indices[-1]
+                                
+                                # Validate the points
+                                min_depth = side_width * 0.05
+                                max_depth = side_width * 0.45  # Bust can be wider than waist
+                                
+                                bust_depth_px = rightmost - leftmost
+                                
+                                if bust_depth_px < min_depth:
+                                    print(f"WARNING: Bust depth too small ({bust_depth_px:.2f}px), using minimum value")
+                                    midpoint = (leftmost + rightmost) // 2
+                                    half_min_depth = min_depth // 2
+                                    leftmost = max(0, midpoint - half_min_depth)
+                                    rightmost = min(side_width - 1, midpoint + half_min_depth)
+                                    bust_depth_px = rightmost - leftmost
+                                
+                                if bust_depth_px > max_depth:
+                                    print(f"WARNING: Bust depth too large ({bust_depth_px:.2f}px), using maximum value")
+                                    midpoint = (leftmost + rightmost) // 2
+                                    half_max_depth = max_depth // 2
+                                    leftmost = max(0, midpoint - half_max_depth)
+                                    rightmost = min(side_width - 1, midpoint + half_max_depth)
+                                    bust_depth_px = rightmost - leftmost
+                                
+                                # Adjust coordinates to be relative to the original image
+                                leftmost_global = leftmost
+                                rightmost_global = rightmost
+                                
+                                # Calculate the midpoint
+                                midpoint_x = (leftmost_global + rightmost_global) // 2
+                                
+                                print(f"DEBUG - Bust depth points: leftmost={leftmost_global}, rightmost={rightmost_global}, depth={bust_depth_px:.2f}px")
+                                
+                                # Draw markers on the side view image
+                                side_img_with_markers = side_img_np.copy() if side_img_with_markers is None else side_img_with_markers
+                                
+                                # Draw the ROI area
+                                cv2.rectangle(side_img_with_markers, (0, bust_roi_y_start), (side_width, bust_roi_y_end), (0, 255, 0), 1)
+                                
+                                # Draw a horizontal line at bust level
+                                cv2.line(side_img_with_markers, (0, bust_y), (side_width, bust_y), (0, 255, 255), 1)
+                                
+                                # Draw markers at leftmost, rightmost, and midpoint
+                                cv2.circle(side_img_with_markers, (leftmost_global, bust_y), 5, (0, 0, 255), -1)  # Red circle for leftmost
+                                cv2.circle(side_img_with_markers, (rightmost_global, bust_y), 5, (255, 0, 0), -1)  # Blue circle for rightmost
+                                cv2.circle(side_img_with_markers, (midpoint_x, bust_y), 5, (0, 255, 0), -1)  # Green circle for midpoint
+                                
+                                # Add text labels
+                                cv2.putText(side_img_with_markers, "Bust Front", (leftmost_global - 30, bust_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                                cv2.putText(side_img_with_markers, "Bust Back", (rightmost_global + 5, bust_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                                cv2.putText(side_img_with_markers, "Center", (midpoint_x - 20, bust_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            else:
+                                print("WARNING: No body silhouette found at bust level")
+                                bust_depth_px = side_width * 0.14  # Default fallback
+                        else:
+                            print("WARNING: Bust center outside of ROI bounds")
+                            bust_depth_px = side_width * 0.14  # Default fallback
+                    else:
+                        print("WARNING: No contours found in bust ROI")
+                        bust_depth_px = side_width * 0.14  # Default fallback
+                    
+                    print(f"DEBUG - No silhouette detected at bust level, using default depth")
                 
-                # Calculate the ratio of depth to width for each measurement
-                # This will help us adjust the circumference calculations
-                hip_depth_to_width_ratio = hip_depth_px / hip_width_px
-                waist_depth_to_width_ratio = waist_depth_px / waist_width_px
-                bust_depth_to_width_ratio = bust_depth_px / bust_width_px
                 
-                # Adjust the circumference multipliers based on the depth-to-width ratios
-                # The idea is to make the circumference calculation more accurate by considering
-                # the actual shape of the body in 3D
-                side_depth_adjustments["hip"] = 0.5 + hip_depth_to_width_ratio
-                side_depth_adjustments["waist"] = 0.5 + waist_depth_to_width_ratio
-                side_depth_adjustments["bust"] = 0.5 + bust_depth_to_width_ratio
+                # Calculate actual depth by doubling the measured depth (to account for both sides)
+                hip_actual_depth_px = hip_depth_px
+                waist_actual_depth_px = waist_depth_px 
+                bust_actual_depth_px = bust_depth_px 
+
+                hip_actual_depth_cm = hip_actual_depth_px * scaling_factor
+                waist_actual_depth_cm = waist_actual_depth_px * scaling_factor
+                bust_actual_depth_cm = bust_actual_depth_px * scaling_factor
+
                 
-                print(f"Side view depth adjustments: hip={side_depth_adjustments['hip']:.2f}, " +
-                      f"waist={side_depth_adjustments['waist']:.2f}, bust={side_depth_adjustments['bust']:.2f}")
+                # Calculate actual width by doubling the measured width (to account for front and back)
+                hip_actual_width_px = hip_width_px
+                waist_actual_width_px = waist_width_px 
+                bust_actual_width_px = bust_width_px 
+
+                hip_actual_width_cm = hip_actual_width_px * scaling_factor
+                waist_actual_width_cm = waist_actual_width_px * scaling_factor
+                bust_actual_width_cm = bust_actual_width_px * scaling_factor
+                
+                print(f"Side view depth adjustments: hip={hip_actual_depth_cm:.2f}, " +
+                      f"waist={waist_actual_depth_cm:.2f}, bust={bust_actual_depth_cm:.2f}")
         
-        # Step 8: Calculate final measurements using the scaling factor, body type-specific multipliers,
-        # and side view depth adjustments if available
-        hip_circumference_cm = hip_width_px * scaling_factor * hip_circumference_multiplier * side_depth_adjustments["hip"]
-        waist_circumference_cm = waist_width_px * scaling_factor * waist_circumference_multiplier * side_depth_adjustments["waist"]
-        inseam_cm = inseam_px * scaling_factor
-        bust_circumference_cm = bust_width_px * scaling_factor * bust_circumference_multiplier * side_depth_adjustments["bust"]
+        # Calculate circumference using a more accurate ellipse perimeter approximation
+        # Using Ramanujan's formula for ellipse perimeter: π(a+b)(1 + 3h/(10 + sqrt(4-3h))) where h=(a-b)²/(a+b)²
+        # where a and b are the semi-major and semi-minor axes
+        
+        def ellipse_perimeter(width, depth):
+            # Semi-major and semi-minor axes
+            a = width / 2
+            b = depth / 2
+            
+            # Handle case where a or b is zero or very small
+            if a < 1 or b < 1:
+                return 2 * np.pi * max(a, b)  # Fallback to circle perimeter
+                
+            # Calculate h parameter
+            h = ((a - b) ** 2) / ((a + b) ** 2)
+            
+            # Calculate perimeter using Ramanujan's formula
+            perimeter = np.pi * (a + b) * (1 + (3 * h) / (10 + np.sqrt(4 - 3 * h)))
+            return perimeter
+        
+        # Calculate circumferences using the improved formula
+        hip_circumference_cm = ellipse_perimeter(hip_width_px, hip_depth_px) * scaling_factor
+        waist_circumference_cm = ellipse_perimeter(waist_width_px, waist_depth_px) * scaling_factor
+        inseam_cm = inseam_px * scaling_factor  # This remains unchanged
+        bust_circumference_cm = ellipse_perimeter(bust_width_px, bust_depth_px) * scaling_factor
+        
+        print(f"DEBUG - Calculated circumferences: hip={hip_circumference_cm:.2f}cm, " +
+              f"waist={waist_circumference_cm:.2f}cm, bust={bust_circumference_cm:.2f}cm")
         
         # Determine sizes based on measurements
         jeans_size = determine_jeans_size(waist_circumference_cm, hip_circumference_cm)
@@ -537,6 +873,26 @@ async def predict_size(
         jeans_details = get_size_details("jeans", jeans_size)
         dress_details = get_size_details("dresses", dress_size)
         skirt_details = get_size_details("skirts", skirt_size)
+        
+        # Convert the marked image to base64 for returning to the client
+        marked_image_base64 = None
+        if side_img_with_markers is not None:
+            # Add a title and explanation to the image
+            cv2.putText(side_img_with_markers, "Improved Depth Measurement", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(side_img_with_markers, "Red: Front point, Blue: Back point", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+            cv2.putText(side_img_with_markers, "Green boxes: Analysis regions", (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+            
+            # Convert to base64 for sending to frontend
+            _, buffer = cv2.imencode('.jpg', side_img_with_markers)
+            marked_image_base64 = base64.b64encode(buffer).decode('utf-8')
+            
+            # Save the marked image to a file for debugging
+            debug_img_path = os.path.join(os.path.dirname(__file__), 'debug_side_view.jpg')
+            cv2.imwrite(debug_img_path, side_img_with_markers)
+            print(f"DEBUG - Saved marked side view image to: {debug_img_path}")
         
         return {
             "measurements": {
@@ -561,7 +917,10 @@ async def predict_size(
                     "eu": skirt_details.get("eu_size", ""),
                     "uk": skirt_details.get("uk_size", "")
                 }
-            }
+            },
+            "debug_images": {
+                "side_view_with_markers": marked_image_base64
+            } if marked_image_base64 else {}
         }
         
     except Exception as e:

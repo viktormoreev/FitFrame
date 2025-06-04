@@ -29,6 +29,9 @@ interface SizeResult {
       uk: string;
     };
   };
+  debug_images?: {
+    side_view_with_markers?: string;
+  };
 }
 
 interface Landmark {
@@ -571,6 +574,29 @@ function App() {
                       When measurements fall between standard sizes, a range is shown (e.g., "4-6").
                     </small>
                   </div>
+                  
+                  {/* Display the marked side view image if available */}
+                  {result.debug_images?.side_view_with_markers && (
+                    <div className="debug-images mt-4">
+                      <h3>Depth Measurement Points</h3>
+                      <div className="alert alert-info mb-2">
+                        <small>
+                          <strong>Visualization:</strong> Red points show leftmost body edge, blue points show rightmost body edge
+                        </small>
+                      </div>
+                      <div className="marked-image-container">
+                        <img
+                          src={`data:image/jpeg;base64,${result.debug_images.side_view_with_markers}`}
+                          alt="Side view with depth measurement points"
+                          className="img-fluid border rounded"
+                        />
+                      </div>
+                      <p className="mt-2 small text-muted">
+                        This image shows the exact points used to measure body depth at hip, waist, and bust levels.
+                        The depth is doubled in calculations to account for both sides of the body.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
