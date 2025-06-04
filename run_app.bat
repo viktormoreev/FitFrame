@@ -37,13 +37,13 @@ echo Waiting for backend to initialize...
 timeout /t 5 /nobreak >nul
 
 echo Starting Frontend Server...
-start cmd /k "cd frontend && npm start"
+start cmd /k "cd frontend && npm run dev"
 
 echo.
 echo SizePredict servers are starting...
 echo.
 echo Backend API: http://localhost:8000
-echo Frontend App: http://localhost:3000
+echo Frontend App: http://localhost:8080
 echo.
 echo Press any key to stop the servers...
 pause >nul

@@ -34,14 +34,14 @@ echo "Waiting for backend to initialize..."
 sleep 5
 
 echo "Starting Frontend Server..."
-cd ../frontend && npm start &
+cd ../frontend && npm run dev &
 FRONTEND_PID=$!
 
 echo
 echo "SizePredict servers are starting..."
 echo
 echo "Backend API: http://localhost:8000"
-echo "Frontend App: http://localhost:3000"
+echo "Frontend App: http://localhost:8080"
 echo
 echo "Press Ctrl+C to stop the servers..."
 
