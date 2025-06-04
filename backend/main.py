@@ -209,7 +209,8 @@ async def get_fixed_pose_mode_status():
 @app.post("/predict-size/")
 async def predict_size(
     image: UploadFile = File(...),
-    height_cm: float = Form(...)  # Making height mandatory
+    height_cm: float = Form(...),  # Making height mandatory
+    side_image: UploadFile = File(...)  # Side view image is now required
 ):
     global pose_detector
     
@@ -219,7 +220,7 @@ async def predict_size(
             if not initialize_pose_detector():
                 raise HTTPException(status_code=500, detail="Could not initialize OpenPose detector. Please check server logs.")
             
-        # Read and process the image
+        # Read and process the front view image
         contents = await image.read()
         try:
             img = Image.open(io.BytesIO(contents))
@@ -231,30 +232,56 @@ async def predict_size(
         except Exception as img_error:
             raise HTTPException(
                 status_code=400,
-                detail=f"Failed to process image: {str(img_error)}"
+                detail=f"Failed to process front view image: {str(img_error)}"
             )
         
-        # Process the image with OpenPose
+        # Process the front view image with OpenPose
         try:
-            results = pose_detector.detect_pose(img_bgr)
+            front_results = pose_detector.detect_pose(img_bgr)
             
-            if not results["landmarks"] or len(results["landmarks"]) == 0:
+            if not front_results["landmarks"] or len(front_results["landmarks"]) == 0:
                 raise HTTPException(
                     status_code=400,
-                    detail="No person detected in the image. Try a clearer photo with full body visible."
+                    detail="No person detected in the front view image. Try a clearer photo with full body visible."
                 )
         except Exception as pose_error:
             raise HTTPException(
                 status_code=500,
-                detail=f"Pose detection failed: {str(pose_error)}"
+                detail=f"Front view pose detection failed: {str(pose_error)}"
+            )
+        
+        # Process side view image (now required)
+        side_results = None
+        side_img_np = None
+        side_contents = await side_image.read()
+        try:
+            side_img = Image.open(io.BytesIO(side_contents))
+            side_img_rgb = side_img.convert('RGB')
+            side_img_np = np.array(side_img_rgb)
+            
+            # Convert from RGB to BGR (OpenCV format)
+            side_img_bgr = cv2.cvtColor(side_img_np, cv2.COLOR_RGB2BGR)
+            
+            # Process the side view image with OpenPose
+            side_results = pose_detector.detect_pose(side_img_bgr)
+            
+            if not side_results["landmarks"] or len(side_results["landmarks"]) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No person detected in the side view image. Try a clearer side view photo."
+                )
+        except Exception as side_img_error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to process side view image: {str(side_img_error)}"
             )
         
         # If we're in demo mode, log a warning
         if hasattr(pose_detector, 'demo_mode') and pose_detector.demo_mode:
             print("WARNING: Using synthetic pose data for size prediction")
             
-        # Extract landmarks from results
-        landmarks = results["landmarks"]
+        # Extract landmarks from front view results
+        landmarks = front_results["landmarks"]
         
         # Get image dimensions for scaling
         image_height, image_width, _ = img_np.shape
@@ -396,11 +423,110 @@ async def predict_size(
             
             print(f"Estimated height: {estimated_height_cm:.1f}cm (based on image proportions)")
         
-        # Step 7: Calculate final measurements using the scaling factor and body type-specific multipliers
-        hip_circumference_cm = hip_width_px * scaling_factor * hip_circumference_multiplier
-        waist_circumference_cm = waist_width_px * scaling_factor * waist_circumference_multiplier
+        # Step 7: Incorporate side view measurements if available
+        side_depth_adjustments = {
+            "hip": 1.0,
+            "waist": 1.0,
+            "bust": 1.0
+        }
+        
+        if side_results and side_img_np is not None:
+            side_landmarks = side_results["landmarks"]
+            side_height, side_width, _ = side_img_np.shape
+            
+            # Check if we have the necessary landmarks in the side view
+            side_required = ["LEFT_HIP", "LEFT_SHOULDER", "NECK"]
+            has_required_side_landmarks = all(lm in side_landmarks and side_landmarks[lm]["visibility"] > 0.1 for lm in side_required)
+            
+            if has_required_side_landmarks:
+                print("Using side view data to improve measurements")
+                
+                # Get key points from side view
+                side_hip = (side_landmarks["LEFT_HIP"]["x"], side_landmarks["LEFT_HIP"]["y"])
+                side_shoulder = (side_landmarks["LEFT_SHOULDER"]["x"], side_landmarks["LEFT_SHOULDER"]["y"])
+                
+                # Calculate depth (anterior-posterior dimension) at hip level
+                # We'll use the width of the person at hip level in the side view
+                # This is an approximation of the depth
+                hip_depth_px = side_width * 0.15  # Default estimate if we can't detect properly
+                
+                # Try to detect the actual depth by analyzing the silhouette at hip level
+                hip_y = int(side_hip[1])
+                if 0 <= hip_y < side_height:
+                    # Get the row of pixels at hip height
+                    hip_row = side_img_np[hip_y, :, :]
+                    
+                    # Convert to grayscale and threshold to find the silhouette
+                    hip_row_gray = cv2.cvtColor(hip_row.reshape(1, side_width, 3), cv2.COLOR_RGB2GRAY)
+                    _, hip_row_thresh = cv2.threshold(hip_row_gray, 127, 255, cv2.THRESH_BINARY_INV)
+                    
+                    # Find the leftmost and rightmost non-zero pixels
+                    non_zero_indices = np.where(hip_row_thresh[0, :] > 0)[0]
+                    if len(non_zero_indices) > 0:
+                        leftmost = non_zero_indices[0]
+                        rightmost = non_zero_indices[-1]
+                        hip_depth_px = rightmost - leftmost
+                
+                # Calculate depth at waist level
+                waist_y = int(side_hip[1] - (side_hip[1] - side_shoulder[1]) * waist_y_offset)
+                waist_depth_px = side_width * 0.12  # Default estimate
+                
+                if 0 <= waist_y < side_height:
+                    # Get the row of pixels at waist height
+                    waist_row = side_img_np[waist_y, :, :]
+                    
+                    # Convert to grayscale and threshold to find the silhouette
+                    waist_row_gray = cv2.cvtColor(waist_row.reshape(1, side_width, 3), cv2.COLOR_RGB2GRAY)
+                    _, waist_row_thresh = cv2.threshold(waist_row_gray, 127, 255, cv2.THRESH_BINARY_INV)
+                    
+                    # Find the leftmost and rightmost non-zero pixels
+                    non_zero_indices = np.where(waist_row_thresh[0, :] > 0)[0]
+                    if len(non_zero_indices) > 0:
+                        leftmost = non_zero_indices[0]
+                        rightmost = non_zero_indices[-1]
+                        waist_depth_px = rightmost - leftmost
+                
+                # Calculate depth at bust level
+                bust_y = int(side_shoulder[1] + (side_hip[1] - side_shoulder[1]) * 0.25)
+                bust_depth_px = side_width * 0.14  # Default estimate
+                
+                if 0 <= bust_y < side_height:
+                    # Get the row of pixels at bust height
+                    bust_row = side_img_np[bust_y, :, :]
+                    
+                    # Convert to grayscale and threshold to find the silhouette
+                    bust_row_gray = cv2.cvtColor(bust_row.reshape(1, side_width, 3), cv2.COLOR_RGB2GRAY)
+                    _, bust_row_thresh = cv2.threshold(bust_row_gray, 127, 255, cv2.THRESH_BINARY_INV)
+                    
+                    # Find the leftmost and rightmost non-zero pixels
+                    non_zero_indices = np.where(bust_row_thresh[0, :] > 0)[0]
+                    if len(non_zero_indices) > 0:
+                        leftmost = non_zero_indices[0]
+                        rightmost = non_zero_indices[-1]
+                        bust_depth_px = rightmost - leftmost
+                
+                # Calculate the ratio of depth to width for each measurement
+                # This will help us adjust the circumference calculations
+                hip_depth_to_width_ratio = hip_depth_px / hip_width_px
+                waist_depth_to_width_ratio = waist_depth_px / waist_width_px
+                bust_depth_to_width_ratio = bust_depth_px / bust_width_px
+                
+                # Adjust the circumference multipliers based on the depth-to-width ratios
+                # The idea is to make the circumference calculation more accurate by considering
+                # the actual shape of the body in 3D
+                side_depth_adjustments["hip"] = 0.5 + hip_depth_to_width_ratio
+                side_depth_adjustments["waist"] = 0.5 + waist_depth_to_width_ratio
+                side_depth_adjustments["bust"] = 0.5 + bust_depth_to_width_ratio
+                
+                print(f"Side view depth adjustments: hip={side_depth_adjustments['hip']:.2f}, " +
+                      f"waist={side_depth_adjustments['waist']:.2f}, bust={side_depth_adjustments['bust']:.2f}")
+        
+        # Step 8: Calculate final measurements using the scaling factor, body type-specific multipliers,
+        # and side view depth adjustments if available
+        hip_circumference_cm = hip_width_px * scaling_factor * hip_circumference_multiplier * side_depth_adjustments["hip"]
+        waist_circumference_cm = waist_width_px * scaling_factor * waist_circumference_multiplier * side_depth_adjustments["waist"]
         inseam_cm = inseam_px * scaling_factor
-        bust_circumference_cm = bust_width_px * scaling_factor * bust_circumference_multiplier
+        bust_circumference_cm = bust_width_px * scaling_factor * bust_circumference_multiplier * side_depth_adjustments["bust"]
         
         # Determine sizes based on measurements
         jeans_size = determine_jeans_size(waist_circumference_cm, hip_circumference_cm)

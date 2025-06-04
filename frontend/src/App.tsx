@@ -60,17 +60,22 @@ interface FixedPoseModeStatus {
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [sideFile, setSideFile] = useState<File | null>(null);
+  const [sidePreviewUrl, setSidePreviewUrl] = useState<string | null>(null);
   const [height, setHeight] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SizeResult | null>(null);
   const [poseData, setPoseData] = useState<PoseResult | null>(null);
+  const [sidePoseData, setSidePoseData] = useState<PoseResult | null>(null);
   const [showPose, setShowPose] = useState<boolean>(false);
+  const [showSidePose, setShowSidePose] = useState<boolean>(false);
   const [detectingPose, setDetectingPose] = useState<boolean>(false);
+  const [detectingSidePose, setDetectingSidePose] = useState<boolean>(false);
   const [fixedPoseModeStatus, setFixedPoseModeStatus] = useState<FixedPoseModeStatus | null>(null);
   const [settingReferencePose, setSettingReferencePose] = useState<boolean>(false);
 
-  const onDrop = (acceptedFiles: File[]) => {
+  const onDropFront = (acceptedFiles: File[]) => {
     setError(null);
     setResult(null);
     
@@ -84,8 +89,30 @@ function App() {
     }
   };
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
+  const onDropSide = (acceptedFiles: File[]) => {
+    setError(null);
+    setResult(null);
+    
+    if (acceptedFiles && acceptedFiles.length > 0) {
+      const selectedFile = acceptedFiles[0];
+      setSideFile(selectedFile);
+      
+      // Create preview
+      const objectUrl = URL.createObjectURL(selectedFile);
+      setSidePreviewUrl(objectUrl);
+    }
+  };
+
+  const { getRootProps: getFrontRootProps, getInputProps: getFrontInputProps, isDragActive: isFrontDragActive } = useDropzone({
+    onDrop: onDropFront,
+    accept: {
+      'image/*': ['.jpeg', '.jpg', '.png'],
+    },
+    maxFiles: 1,
+  });
+
+  const { getRootProps: getSideRootProps, getInputProps: getSideInputProps, isDragActive: isSideDragActive } = useDropzone({
+    onDrop: onDropSide,
     accept: {
       'image/*': ['.jpeg', '.jpg', '.png'],
     },
@@ -96,7 +123,12 @@ function App() {
     e.preventDefault();
     
     if (!file) {
-      setError('Please upload an image first');
+      setError('Please upload a front view image first');
+      return;
+    }
+    
+    if (!sideFile) {
+      setError('Please upload a side view image');
       return;
     }
     
@@ -109,9 +141,13 @@ function App() {
     setError(null);
     setResult(null);
 
+    // Detect pose in both images first
+    await detectBothPoses();
+
     const formData = new FormData();
     formData.append('image', file);
     formData.append('height_cm', height);
+    formData.append('side_image', sideFile);
 
     try {
       const response = await axios.post('http://localhost:8000/predict-size/', formData, {
@@ -128,10 +164,57 @@ function App() {
       setLoading(false);
     }
   };
+
+  // Helper function to detect pose in both images
+  const detectBothPoses = async () => {
+    // Detect front pose
+    if (file) {
+      setDetectingPose(true);
+      const formData = new FormData();
+      formData.append('image', file);
+
+      try {
+        const response = await axios.post('http://localhost:8000/detect-pose/', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+        
+        setPoseData(response.data);
+        setShowPose(true);
+      } catch (err) {
+        console.error('Error detecting front pose:', err);
+      } finally {
+        setDetectingPose(false);
+      }
+    }
+
+    // Detect side pose
+    if (sideFile) {
+      setDetectingSidePose(true);
+      const formData = new FormData();
+      formData.append('image', sideFile);
+
+      try {
+        const response = await axios.post('http://localhost:8000/detect-pose/', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+        
+        setSidePoseData(response.data);
+        setShowSidePose(true);
+      } catch (err) {
+        console.error('Error detecting side pose:', err);
+      } finally {
+        setDetectingSidePose(false);
+      }
+    }
+  };
   
   const handleDetectPose = async () => {
     if (!file) {
-      setError('Please upload an image first');
+      setError('Please upload a front view image first');
       return;
     }
 
@@ -155,6 +238,35 @@ function App() {
       setError('An error occurred while detecting pose. Please try a different image.');
     } finally {
       setDetectingPose(false);
+    }
+  };
+
+  const handleDetectSidePose = async () => {
+    if (!sideFile) {
+      setError('Please upload a side view image first');
+      return;
+    }
+
+    setDetectingSidePose(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.append('image', sideFile);
+
+    try {
+      const response = await axios.post('http://localhost:8000/detect-pose/', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      });
+      
+      setSidePoseData(response.data);
+      setShowSidePose(true);
+    } catch (err) {
+      console.error('Error:', err);
+      setError('An error occurred while detecting pose in side view. Please try a different image.');
+    } finally {
+      setDetectingSidePose(false);
     }
   };
 
@@ -187,15 +299,7 @@ function App() {
     }
   };
 
-  const handleToggleFixedPoseMode = async () => {
-    try {
-      const response = await axios.get('http://localhost:8000/toggle-fixed-pose-mode/');
-      setFixedPoseModeStatus(response.data);
-    } catch (err: any) {
-      console.error('Error:', err);
-      setError(`Error toggling fixed pose mode: ${err.response?.data?.detail || 'Unknown error'}`);
-    }
-  };
+
 
   const fetchFixedPoseModeStatus = async () => {
     try {
@@ -215,24 +319,40 @@ function App() {
     <div className="App">
       <header className="App-header">
         <h1>Size Predict</h1>
-        <p className="subtitle">Estimate clothing sizes from a full-body photo</p>
+        <p className="subtitle">Estimate clothing sizes from full-body photos</p>
       </header>
       
       <main className="container">
         <div className="row">
           <div className="col-md-6">
             <div className="upload-section">
-              <h2>Upload Photo</h2>
-              <div 
-                {...getRootProps()} 
-                className={`dropzone ${isDragActive ? 'active' : ''}`}
+              <h2>Upload Photos</h2>
+              <div
+                {...getFrontRootProps()}
+                className={`dropzone ${isFrontDragActive ? 'active' : ''}`}
               >
-                <input {...getInputProps()} />
+                <input {...getFrontInputProps()} />
                 {previewUrl ? (
-                  <img src={previewUrl} alt="Preview" className="preview-image" />
+                  <img src={previewUrl} alt="Front Preview" className="preview-image" />
                 ) : (
-                  <p>Drag & drop a full-body photo here, or click to select</p>
+                  <p>Drag & drop a front-view full-body photo here, or click to select</p>
                 )}
+              </div>
+
+              <div className="mt-3">
+                <h4>Side View (Required)</h4>
+                <p className="small text-muted">Side view is needed for accurate 3D body measurements</p>
+                <div
+                  {...getSideRootProps()}
+                  className={`dropzone ${isSideDragActive ? 'active' : ''}`}
+                >
+                  <input {...getSideInputProps()} />
+                  {sidePreviewUrl ? (
+                    <img src={sidePreviewUrl} alt="Side Preview" className="preview-image" />
+                  ) : (
+                    <p>Drag & drop a side-view photo here, or click to select</p>
+                  )}
+                </div>
               </div>
               
               <div className="height-input mt-3">
@@ -254,9 +374,9 @@ function App() {
               <button
                 className="btn btn-primary mt-3"
                 onClick={handleSubmit}
-                disabled={!file || loading || !height}
+                disabled={!file || !sideFile || loading || !height}
               >
-                {loading ? 'Processing...' : 'Predict My Size'}
+                {loading ? 'Processing...' : 'Predict Size & Show Body Points'}
               </button>
               
               <button
@@ -264,50 +384,25 @@ function App() {
                 onClick={handleDetectPose}
                 disabled={!file || loading || detectingPose}
               >
-                {detectingPose ? 'Detecting...' : 'Show Body Points'}
+                {detectingPose ? 'Detecting...' : 'Show Front Body Points'}
               </button>
               
-              <div className="fixed-pose-controls mt-4">
-                <h3>Fixed Pose Mode</h3>
-                <p className="small text-muted">
-                  In fixed pose mode, all photos will use the same reference points for consistency.
-                </p>
-                
-                <div className="d-flex flex-wrap gap-2 mb-3">
-                  <button
-                    className="btn btn-outline-primary"
-                    onClick={handleSetReferencePose}
-                    disabled={!file || settingReferencePose}
-                  >
-                    {settingReferencePose ? 'Setting...' : 'Set Current Image as Reference'}
-                  </button>
-                  
-                  <button
-                    className={`btn ${fixedPoseModeStatus?.fixed_pose_mode ? 'btn-success' : 'btn-outline-secondary'}`}
-                    onClick={handleToggleFixedPoseMode}
-                    disabled={!fixedPoseModeStatus?.has_reference_pose}
-                  >
-                    {fixedPoseModeStatus?.fixed_pose_mode ? 'Fixed Pose Mode: ON' : 'Fixed Pose Mode: OFF'}
-                  </button>
-                </div>
-                
-                {fixedPoseModeStatus && (
-                  <div className={`alert ${fixedPoseModeStatus.fixed_pose_mode ? 'alert-success' : 'alert-secondary'} small`}>
-                    <strong>Status:</strong> {fixedPoseModeStatus.message}
-                  </div>
-                )}
-              </div>
+              <button
+                className="btn btn-secondary mt-3 ms-2"
+                onClick={handleDetectSidePose}
+                disabled={!sideFile || loading || detectingSidePose}
+              >
+                {detectingSidePose ? 'Detecting...' : 'Show Side Body Points'}
+              </button>
               
               {error && (
                 <div className="alert alert-danger mt-3">
                   {error}
                 </div>
               )}
-            </div>
-            
-            {showPose && poseData && previewUrl && (
+              {showPose && poseData && previewUrl && (
               <div className="mt-4">
-                <h3>Body Keypoints</h3>
+                <h3>Front View Body Keypoints</h3>
                 <div className="pose-container">
                   <PoseVisualizer
                     landmarks={poseData.landmarks}
@@ -331,6 +426,36 @@ function App() {
                 </button>
               </div>
             )}
+            
+            {showSidePose && sidePoseData && sidePreviewUrl && (
+              <div className="mt-4">
+                <h3>Side View Body Keypoints</h3>
+                <div className="pose-container">
+                  <PoseVisualizer
+                    landmarks={sidePoseData.landmarks}
+                    connections={sidePoseData.connections}
+                    imageWidth={sidePoseData.image_width}
+                    imageHeight={sidePoseData.image_height}
+                    imageUrl={sidePreviewUrl}
+                  />
+                </div>
+                <p className="mt-2 small text-muted">
+                  Side view keypoints help determine body depth for more accurate measurements.
+                  {sidePoseData.warning && (
+                    <span className="text-warning"> Warning: {sidePoseData.warning}</span>
+                  )}
+                </p>
+                <button
+                  className="btn btn-outline-secondary btn-sm mt-2"
+                  onClick={() => setShowSidePose(false)}
+                >
+                  Hide Points
+                </button>
+              </div>
+            )}
+            </div>
+            
+            
           </div>
           
           <div className="col-md-6">
@@ -342,24 +467,45 @@ function App() {
                   <div className="spinner-border" role="status">
                     <span className="visually-hidden">Loading...</span>
                   </div>
-                  <p>Analyzing your photo...</p>
+                  <p>Analyzing your photos...</p>
                 </div>
               )}
               
               {!loading && !result && !error && (
                 <div className="placeholder-results">
-                  <p>Upload a photo to see your estimated sizes</p>
+                  <p>Upload photos to see your estimated sizes</p>
                   <ul>
-                    <li>Use a full-body photo</li>
-                    <li>Stand straight, arms slightly away from body</li>
+                    <li>Front view: Stand straight, arms slightly away from body</li>
+                    <li>Side view: Stand straight in profile position</li>
                     <li>Wear fitted clothing for best results</li>
+                    <li>Both views are required for accurate 3D measurements</li>
                   </ul>
+                  
+                  <div className="mt-3 p-3 bg-light rounded">
+                    <h5>Why add a side view?</h5>
+                    <p className="small">
+                      A side view captures your body's depth, which is essential for accurate
+                      circumference measurements. Front view only shows width, while side view
+                      reveals anterior-posterior dimensions that are invisible from the front.
+                    </p>
+                    <p className="small">
+                      This is particularly important for waist, hip, and bust measurements,
+                      where the shape varies significantly between individuals.
+                    </p>
+                  </div>
                 </div>
               )}
               
               {result && (
                 <div className="size-results">
                   <h3>Estimated Measurements</h3>
+                  {sideFile && (
+                    <div className="alert alert-success mb-3">
+                      <small>
+                        <strong>Enhanced accuracy:</strong> Side view data was used to improve measurement precision
+                      </small>
+                    </div>
+                  )}
                   <div className="measurements">
                     <div className="measurement-item">
                       <span className="label">Bust:</span>
@@ -431,14 +577,6 @@ function App() {
           </div>
         </div>
       </main>
-      
-      <footer className="footer mt-5">
-        <div className="container">
-          <p className="text-center">
-            SizePredict MVP - A prototype for clothing size estimation
-          </p>
-        </div>
-      </footer>
     </div>
   );
 }
